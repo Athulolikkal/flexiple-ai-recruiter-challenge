@@ -5,7 +5,7 @@ hiring for in plain English, the system turns that into structured search criter
 locally-filtered candidate pool against a fit rubric, and lets the recruiter refine the search
 with natural-language feedback until they're ready to freeze it.
 
-This is a focused implementation of one workflow, not a platform. See [What was cut](#what-was-intentionally-cut) for scope decisions.
+This is a focused implementation of one workflow, not a platform. See [What was cut](#12-what-was-intentionally-cut) for scope decisions.
 
 ## 1. Overview
 
@@ -190,7 +190,111 @@ Each prompt (in `server/src/prompts/`):
 - For refinement, requires a `reason` tied to specific feedback/candidate for every changed
   field, and forbids changing fields the feedback doesn't support.
 
-## 7. Validation & error handling
+## 7. Prompts
+
+The exact prompt text sent to Gemini for each of the three LLM calls, reproduced verbatim from
+`server/src/prompts/` (source of truth — if these ever drift from the code, the code wins).
+`${...}` marks a runtime-interpolated value (the recruiter's query, current filters/rubric, or
+candidate data).
+
+### 7.1 Parse search → filters + rubric (`parse-search.prompt.ts`)
+
+```
+You are the search-parsing component of an AI technical recruiter.
+
+TASK
+Read the recruiter's free-text hiring requirement below and convert it into:
+1. OBJECTIVE FILTERS - facts that can be checked mechanically against a candidate record (skills, years of experience range, location, company background/type).
+2. A SUBJECTIVE FIT RUBRIC - a short description of what separates a strong candidate from the rest, for qualities that cannot be reduced to a simple equality/range check (ownership, seniority signals beyond years, domain judgement, career trajectory, etc).
+
+RECRUITER REQUIREMENT
+"""
+${query}
+"""
+
+RULES
+- "skills" must be technology/domain keywords mentioned or clearly implied by the requirement (e.g. "RDS developers" implies "AWS RDS"). Do not invent skills with no basis in the requirement text.
+- "minYearsExperience" / "maxYearsExperience" must be null if the requirement gives no experience range, and numbers otherwise. "4-7 years" means min=4, max=7. "at least 5 years" means min=5, max=null.
+- "location" must be null if no location is mentioned, otherwise the city/region as written.
+- "companyTypes" may only contain values from this fixed vocabulary: "startup", "scaleup", "enterprise", "agency" - and only include one if the requirement actually implies it (e.g. "worked at startups" implies "startup"). Do not guess.
+- "rubric" must describe ONLY the subjective qualities - do not restate the objective filters inside it. Keep it to 2-4 sentences.
+- Only use information present in the requirement text. Do not assume facts that are not stated.
+- Return only the structured data described by the response schema - no prose, no markdown, no extra commentary.
+```
+
+### 7.2 Score candidates against the rubric (`score-candidates.prompt.ts`)
+
+```
+You are the candidate-scoring component of an AI technical recruiter.
+
+ORIGINAL REQUIREMENT
+"""
+${query}
+"""
+
+SUBJECTIVE FIT RUBRIC
+This candidate pool has already passed the objective filters (skills/experience/location/company type). Use this rubric only to judge quality beyond that baseline.
+"""
+${rubric}
+"""
+
+CANDIDATES
+This is the ONLY source of truth about these people. Do not invent, assume, guess, or embellish any fact that is not present below.
+${JSON.stringify(candidates)}
+
+TASK
+Score every candidate above from 0 to 100 against the fit rubric, and give a one-to-two sentence explanation for each score.
+
+RULES
+- Every explanation MUST cite only facts that appear verbatim in that candidate's data above (years_experience, location, current_company, current_company_type, skills, past_companies, education, summary).
+- Never state a fact about a candidate that is not present in their data. Never invent years of experience, employers, or skills.
+- Do not use ungrounded generic praise such as "excellent candidate" or "great technical skills". Every claim must be traceable to a specific field you were given.
+- A higher score should reflect closer alignment with the rubric and the requirement, not just seniority.
+- Return exactly one entry per candidate, using the candidate's "id" field verbatim as "candidateId".
+- Return only the structured data described by the response schema - no prose, no markdown, no extra commentary.
+```
+
+### 7.3 Refine filters/rubric from recruiter feedback (`refine-search.prompt.ts`)
+
+```
+You are the search-refinement component of an AI technical recruiter.
+
+ORIGINAL REQUIREMENT
+"""
+${query}
+"""
+
+CURRENT OBJECTIVE FILTERS
+${JSON.stringify(filters)}
+
+CURRENT SUBJECTIVE FIT RUBRIC
+"""
+${rubric}
+"""
+
+CANDIDATES THE RECRUITER JUST REVIEWED, IN THE ORDER SHOWN (displayPosition is the 1-based rank the recruiter saw; use it to resolve references like "candidate 1" or "the second one". Scores from the last pass are not repeated here - use these facts directly.)
+${JSON.stringify(candidates)}
+
+RECRUITER FEEDBACK
+"""
+${feedback}
+"""
+
+TASK
+Interpret the recruiter's feedback and propose an updated set of objective filters and/or subjective rubric that will produce a better shortlist on the next run.
+
+RULES
+- Only change a field if the feedback actually implies a change to it. Copy every other field through unchanged from the current filters/rubric shown above.
+- "skills" / "minYearsExperience" / "maxYearsExperience" / "location" / "companyTypes" follow the same semantics as before: null/empty means "no constraint". Never invent a constraint the feedback does not support.
+- "companyTypes" may only contain values from this fixed vocabulary: "startup", "scaleup", "enterprise", "agency".
+- For every field you change, add one entry to "changes" with the exact previous value, the exact new value, and a one-sentence reason that names the specific recruiter feedback or candidate that drove it (e.g. "Raised minYearsExperience from 4 to 6 because candidate 1 (4 years experience) was marked too junior.").
+- If a field is unchanged, do not add a "changes" entry for it.
+- Resolve any ordinal or positional reference ("1", "the first one", "candidate 2") against the displayPosition values above, then use the candidate's real facts (not just their score/explanation) to justify the change.
+- Do not invent facts about any candidate beyond what is given above.
+- Return only the structured data described by the response schema - no prose, no markdown, no extra commentary.
+```
+
+## 8. Validation & error handling
 
 - **Request validation**: NestJS `ValidationPipe` with `whitelist`/`forbidNonWhitelisted` on all
   DTOs (`search/dto/*.dto.ts`) — query/feedback length limits, a fixed `companyTypes`
@@ -213,7 +317,7 @@ Each prompt (in `server/src/prompts/`):
   re-issues the exact failed request (search, edit-and-rerun, or refine) without losing the
   recruiter's current filters/rubric/results.
 
-## 8. Security considerations
+## 9. Security considerations
 
 - `GEMINI_API_KEY` is read via `ConfigService` on the server only; the client has no API keys or
   secrets. `.env` is git-ignored; `.env.example` documents the required shape.
@@ -226,7 +330,7 @@ Each prompt (in `server/src/prompts/`):
 - Every request body is validated and whitelisted; unknown fields are rejected.
 - Errors never leak provider details or stack traces (see above).
 
-## 9. Key engineering decisions
+## 10. Key engineering decisions
 
 - **Zod for LLM output, class-validator for request DTOs** — two different trust boundaries
   (an external AI provider vs. the app's own client) validated with the tool that fits each.
@@ -244,13 +348,13 @@ Each prompt (in `server/src/prompts/`):
   "Evaluating the shortlisted profiles...") communicates what's happening without fabricating
   precision the app doesn't have.
 
-## 10. What was prioritized
+## 11. What was prioritized
 
 Per the assignment's own ordering: end-to-end functionality and refinement loop quality first,
 then LLM interaction quality, structured output validation, and grounded explanations, then
 error handling, clean UX, and reusable architecture.
 
-## 11. What was intentionally cut
+## 12. What was intentionally cut
 
 - No authentication, persistence, database, or multi-user support — session state lives in
   React state for the duration of one browser session, as specified.
@@ -260,7 +364,7 @@ error handling, clean UX, and reusable architecture.
 - No "unfreeze" action — freezing is presented as a deliberate final step; starting over uses
   "Start new search" instead of a reversible toggle.
 
-## 12. Known limitations
+## 13. Known limitations
 
 - Skill matching is substring-based (case-insensitive, bidirectional), not semantic — it
   handles the dataset well (e.g. "RDS" ↔ "AWS RDS") but won't catch synonyms with no textual
@@ -270,7 +374,7 @@ error handling, clean UX, and reusable architecture.
 - Company-type vocabulary is fixed to the four values present in the dataset (`startup`,
   `scaleup`, `enterprise`, `agency`); a differently-shaped dataset would need this updated.
 
-## 13. Testing
+## 14. Testing
 
 Backend unit tests (`npm test` inside `server/`) cover:
 

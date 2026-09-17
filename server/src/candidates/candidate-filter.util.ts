@@ -6,14 +6,24 @@ function normalize(value: string): string {
 }
 
 /**
+ * Strips punctuation ("Node.js" -> "nodejs", "CI/CD" -> "cicd") so skill names
+ * that differ only by separators still match. Applied on top of `normalize`,
+ * only for skill comparison - location/company text keeps its own spacing.
+ */
+function normalizeSkillToken(value: string): string {
+  return normalize(value).replace(/[^a-z0-9]/g, '');
+}
+
+/**
  * A candidate's skill list matches a required skill if either string contains
  * the other once normalized. This lets a filter skill of "RDS" match a candidate
- * skill of "AWS RDS", and "Postgres" match "PostgreSQL", without fuzzy/AI matching.
+ * skill of "AWS RDS", "Postgres" match "PostgreSQL", and "nodejs" match "Node.js",
+ * without fuzzy/AI matching.
  */
 function hasMatchingSkill(candidateSkills: string[], requiredSkill: string): boolean {
-  const required = normalize(requiredSkill);
+  const required = normalizeSkillToken(requiredSkill);
   return candidateSkills.some((skill) => {
-    const owned = normalize(skill);
+    const owned = normalizeSkillToken(skill);
     return owned.includes(required) || required.includes(owned);
   });
 }
